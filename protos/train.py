@@ -1,9 +1,9 @@
 import pandas as pd
 import numpy as np
-
+from tqdm import tqdm
 from sklearn.linear_model import LogisticRegression
-from sklearn.model_selection import StratifiedKFold
-from sklearn.metrics import log_loss, roc_auc_score
+from sklearn.model_selection import StratifiedKFold, ParameterGrid
+from sklearn.metrics import log_loss, roc_auc_score, roc_curve, auc
 from logging import StreamHandler, DEBUG, Formatter, FileHandler, getLogger
 
 from load_data import load_train_data, load_test_data
@@ -12,6 +12,11 @@ logger = getLogger(__name__)
 
 DIR = 'result_tmp/'
 SAMPLE_SUBMIT_FILE = '../input/sample_submission.csv'
+
+def gini(y, pred):
+    fpr, tpr, thr = roc_curve(y, pred, pos_label=1)
+    g = 2 * auc(fpr, tpr) - 1
+    return g
 
 if __name__ == '__main__':
     log_fmt = Formatter('%(asctime)s %(name)s %(lineno)d [%(levelname)s][%(funcName)s] %(message)s ')
@@ -40,31 +45,50 @@ if __name__ == '__main__':
     logger.info('data preparation end {}'.format(x_train.shape))
 
     cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=0)
+    all_params = {'C':[10**i for i in range(-1, 2)],
+                  'fit_intercept': [True, False],
+                  'penalty':['l2'],
+                  'solver' :['lbfgs'],
+                  'random_state': [0]}
 
-    list_auc_score = []
-    list_logloss_score = []
+    min_score = 100
+    min_params = None
 
-    for train_idx, valid_idx in cv.split(x_train, y_train):
-        trn_x = x_train.iloc[train_idx, :]
-        val_x = x_train.iloc[valid_idx, :]
-       
-        trn_y = y_train[train_idx]
-        val_y = y_train[valid_idx]
+    for params in tqdm(list(ParameterGrid(all_params))):
+        logger.info('params: {}'.format(params))
 
-        clf = LogisticRegression(solver='lbfgs', random_state=0)
-        clf.fit(x_train, y_train)
+        list_gini_score = []
+        list_logloss_score = []
 
-        pred = clf.predict_proba(val_x)[:,1]
-        sc_logloss = log_loss(val_y, pred)
-        sc_auc = roc_auc_score(val_y, pred)
+        for train_idx, valid_idx in cv.split(x_train, y_train):
+            trn_x = x_train.iloc[train_idx, :]
+            val_x = x_train.iloc[valid_idx, :]
+           
+            trn_y = y_train[train_idx]
+            val_y = y_train[valid_idx]
 
-        list_logloss_score.append(sc_logloss)
-        list_auc_score.append(sc_auc)
+            clf = LogisticRegression(**params)
+            clf.fit(x_train, y_train)
 
-        logger.info('   logloss: {}, auc: {}'.format(sc_logloss, sc_auc))
-    logger.info('logloss: {}, auc: {}'.format(np.mean(list_logloss_score), np.mean(list_auc_score)))
+            pred = clf.predict_proba(val_x)[:,1]
+            sc_logloss = log_loss(val_y, pred)
+            sc_gini = - gini(val_y, pred)
 
-    clf = LogisticRegression(solver='lbfgs', random_state=0)
+            list_logloss_score.append(sc_logloss)
+            list_gini_score.append(sc_gini)
+
+            logger.debug('   logloss: {}, gini: {}'.format(sc_logloss, sc_gini))
+            break
+        sc_gini = np.mean(list_gini_score)
+        sc_logloss = np.mean(list_logloss_score)
+        logger.info('logloss: {}, gini: {}'.format(sc_logloss, sc_gini))
+        if min_score > sc_gini:
+            min_score = sc_gini
+            min_params = params
+    logger.info('minimum params: {}'.format(min_params))
+    logger.info('minimum gini: {}'.format(min_score))
+
+    clf = LogisticRegression(**min_params)
     clf.fit(x_train, y_train)
     logger.info('train end')
 
